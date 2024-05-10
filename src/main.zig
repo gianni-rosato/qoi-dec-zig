@@ -136,9 +136,9 @@ const QoiDec = struct {
     fn qoiDecLuma(dec: *QoiDec, tag: u8) void {
         const lumaGreen: u8 = (tag & QOI_TAG_MASK) - 32;
 
-        dec.prev_pixel.vals.red += @intCast(lumaGreen + ((dec.offset[1] & 0xF0) >> 4) - 8);
-        dec.prev_pixel.vals.green += lumaGreen;
-        dec.prev_pixel.vals.blue += @intCast(lumaGreen + (dec.offset[1] & 0x0F) - 8);
+        dec.prev_pixel.vals.red +%= lumaGreen + ((dec.offset[1] & 0xF0) >> 4) - 8;
+        dec.prev_pixel.vals.green +%= lumaGreen;
+        dec.prev_pixel.vals.blue +%= lumaGreen + (dec.offset[1] & 0x0F) - 8;
 
         dec.offset += 2;
     }
