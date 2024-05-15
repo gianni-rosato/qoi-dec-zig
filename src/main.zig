@@ -240,9 +240,30 @@ pub fn main() !void {
         seek += desc.channels;
     }
 
+    const widthString = try std.fmt.allocPrint(allocator, "{}", .{desc.width});
+    const heightString = try std.fmt.allocPrint(allocator, "{}", .{desc.height});
+    defer allocator.free(widthString);
+    defer allocator.free(heightString);
+
     const outfile = try std.fs.cwd().createFile(args[2], .{ .truncate = true });
     defer outfile.close();
-    _ = try outfile.writeAll(bytes);
+    if (desc.channels == 3) {
+        _ = try outfile.write("P7\n" ++ "WIDTH ");
+        _ = try outfile.write(widthString);
+        _ = try outfile.write("\nHEIGHT ");
+        _ = try outfile.write(heightString);
+        _ = try outfile.write("\nDEPTH 3\n");
+        _ = try outfile.write("MAXVAL 255\n" ++ "TUPLTYPE " ++ "RGB" ++ "\nENDHDR\n");
+        _ = try outfile.writeAll(bytes);
+    } else {
+        _ = try outfile.write("P7\n" ++ "WIDTH ");
+        _ = try outfile.write(widthString);
+        _ = try outfile.write("\nHEIGHT ");
+        _ = try outfile.write(heightString);
+        _ = try outfile.write("\nDEPTH 4\n");
+        _ = try outfile.write("MAXVAL 255\n" ++ "TUPLTYPE " ++ "RGB_ALPHA" ++ "\nENDHDR\n");
+        _ = try outfile.write(bytes);
+    }
 
     print("\x1b[32mSuccess!\x1b[0m\n", .{});
 }
