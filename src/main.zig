@@ -1,18 +1,21 @@
 const std = @import("std");
 const print = std.debug.print;
 const eql = std.mem.eql;
-const File = std.fs.File;
 
-const QOI_OP_RGB: u8 = 0xFE;
-const QOI_OP_RGBA: u8 = 0xFF;
+const QoiEnum = enum(u8) {
+    QOI_OP_RGB = 0xFE,
+    QOI_OP_RGBA = 0xFF,
 
-const QOI_OP_INDEX: u8 = 0x00;
-const QOI_OP_DIFF: u8 = 0x40;
-const QOI_OP_LUMA: u8 = 0x80;
-const QOI_OP_RUN: u8 = 0xC0;
+    QOI_OP_INDEX = 0x00,
+    QOI_OP_DIFF = 0x40,
+    QOI_OP_LUMA = 0x80,
+    QOI_OP_RUN = 0xC0,
+};
 
-const QOI_TAG: u8 = 0xC0;
-const QOI_TAG_MASK: u8 = 0x3F;
+const QoiTagEnum = enum(u8) {
+    QOI_TAG = 0xC0,
+    QOI_TAG_MASK = 0x3F,
+};
 
 const QOI_MAGIC = "qoif";
 
@@ -68,9 +71,7 @@ const QoiDec = struct {
     pad: u24,
     fn qoiDecInit(self: *QoiDec, desc: QoiDesc, data: [*]u8, len: usize) void {
         for (0..64) |i| {
-            self.buffer[i].vals.red = 0;
-            self.buffer[i].vals.green = 0;
-            self.buffer[i].vals.blue = 0;
+            for (0..3) |j| self.buffer[i].channels[j] = 0;
             self.buffer[i].vals.alpha = 255;
         }
 
@@ -92,11 +93,11 @@ const QoiDec = struct {
         dec.offset += s;
     }
     fn qoiDecIndex(dec: *QoiDec, tag: u8) void {
-        dec.prev_pixel = dec.buffer[tag & QOI_TAG_MASK];
+        dec.prev_pixel = dec.buffer[tag & @intFromEnum(QoiTagEnum.QOI_TAG_MASK)];
         dec.offset += 1;
     }
     fn qoiDecDiff(dec: *QoiDec, tag: u8) void {
-        const diff: u8 = tag & QOI_TAG_MASK;
+        const diff: u8 = tag & @intFromEnum(QoiTagEnum.QOI_TAG_MASK);
 
         dec.prev_pixel.vals.red +%= @as(u8, (diff >> 4 & 0x03) -% 2);
         dec.prev_pixel.vals.green +%= @as(u8, (diff >> 2 & 0x03) -% 2);
@@ -105,7 +106,7 @@ const QoiDec = struct {
         dec.offset += 1;
     }
     fn qoiDecLuma(dec: *QoiDec, tag: u8) void {
-        const lumaGreen: u8 = (tag & QOI_TAG_MASK) -% 32;
+        const lumaGreen: u8 = (tag & @intFromEnum(QoiTagEnum.QOI_TAG_MASK)) -% 32;
 
         dec.prev_pixel.vals.red +%= lumaGreen +% ((dec.offset[1] & 0xF0) >> 4) -% 8;
         dec.prev_pixel.vals.green +%= lumaGreen;
@@ -114,7 +115,7 @@ const QoiDec = struct {
         dec.offset += 2;
     }
     fn qoiDecRun(dec: *QoiDec, tag: u8) void {
-        dec.run = tag & QOI_TAG_MASK;
+        dec.run = tag & @intFromEnum(QoiTagEnum.QOI_TAG_MASK);
         dec.offset += 1;
     }
     fn qoiDecodeChunk(dec: *QoiDec) QoiPixel {
@@ -126,14 +127,15 @@ const QoiDec = struct {
 
         const tag: u8 = dec.offset[0];
         switch (tag) {
-            QOI_OP_RGB => dec.qoiDecFullColor(4),
-            QOI_OP_RGBA => dec.qoiDecFullColor(5),
+            @intFromEnum(QoiEnum.QOI_OP_RGB) => dec.qoiDecFullColor(4),
+            @intFromEnum(QoiEnum.QOI_OP_RGBA) => dec.qoiDecFullColor(5),
             else => {
-                switch (tag & QOI_TAG) {
-                    QOI_OP_INDEX => dec.qoiDecIndex(tag),
-                    QOI_OP_DIFF => dec.qoiDecDiff(tag),
-                    QOI_OP_LUMA => dec.qoiDecLuma(tag),
-                    QOI_OP_RUN => dec.qoiDecRun(tag),
+                const tag_enum: QoiEnum = @enumFromInt(tag & @intFromEnum(QoiTagEnum.QOI_TAG));
+                switch (tag_enum) {
+                    QoiEnum.QOI_OP_INDEX => dec.qoiDecIndex(tag),
+                    QoiEnum.QOI_OP_DIFF => dec.qoiDecDiff(tag),
+                    QoiEnum.QOI_OP_LUMA => dec.qoiDecLuma(tag),
+                    QoiEnum.QOI_OP_RUN => dec.qoiDecRun(tag),
                     else => dec.offset += 1,
                 }
             },
@@ -185,7 +187,6 @@ pub fn main() !void {
     const raw_image_length: usize = @intCast(desc.width * desc.height * desc.channels);
     if (raw_image_length == 0) return error.InvalidInput;
     var seek: usize = 0;
-    var pam_header_offset: u8 = 0;
 
     var dec: QoiDec = undefined;
     dec.qoiDecInit(desc, qoi_bytes.ptr, qoi_bytes.len);
@@ -195,8 +196,8 @@ pub fn main() !void {
 
     print("Decoding {s} --> {s} ... ", .{ args[1], args[2] });
 
-    // !(dec.offset - dec.data > dec.qoi_len - 8) or
-    while (!(dec.pixel_seek >= dec.img_area)) {
+    // !(@intFromPtr(dec.offset) - @intFromPtr(dec.data) > dec.qoi_len - 8) or
+    while (!(@intFromPtr(dec.offset) - @intFromPtr(dec.data) > dec.qoi_len - 8) or !(dec.pixel_seek >= dec.img_area)) {
         const px: QoiPixel = dec.qoiDecodeChunk();
         @memcpy(bytes[seek .. seek + desc.channels], px.channels[0..desc.channels]);
         seek += desc.channels;
@@ -219,7 +220,7 @@ pub fn main() !void {
         else => "RGB_ALPHA\n",
     };
 
-    pam_header_offset = @intCast(9 + widthString.len + 8 + heightString.len + channelString.len + 11 + 9 + tuplTypeString.len + 7);
+    const pam_header_offset: u8 = @intCast(widthString.len + heightString.len + channelString.len + tuplTypeString.len + 44);
 
     _ = try outfile.write("P7\n" ++ "WIDTH ");
     _ = try outfile.write(widthString);
