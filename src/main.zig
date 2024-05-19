@@ -1,8 +1,7 @@
 const std = @import("std");
 const print = std.debug.print;
-const parseInt = std.fmt.parseInt;
-const writeInt = std.mem.writeInt;
 const eql = std.mem.eql;
+const File = std.fs.File;
 
 const QOI_OP_RGB: u8 = 0xFE;
 const QOI_OP_RGBA: u8 = 0xFF;
@@ -16,7 +15,6 @@ const QOI_TAG: u8 = 0xC0;
 const QOI_TAG_MASK: u8 = 0x3F;
 
 const QOI_MAGIC = "qoif";
-const QOI_PADDING: *const [8]u8 = &.{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
 const QoiPixel = extern union {
     vals: extern struct {
@@ -26,7 +24,6 @@ const QoiPixel = extern union {
         alpha: u8,
     },
     channels: [4]u8,
-    concatenated_pixel_values: u32,
 };
 
 const QoiDesc = struct {
@@ -35,16 +32,6 @@ const QoiDesc = struct {
     channels: u8 = 0,
     colorspace: u8 = 0,
 
-    fn qoiSetEverything(w: u32, h: u32, ch: u8, c: u8) QoiDesc {
-        return QoiDesc{ .width = w, .height = h, .channels = ch, .colorspace = c };
-    }
-    fn writeQoiHeader(self: QoiDesc, dest: *[14]u8) void {
-        @memcpy(dest[0..4], QOI_MAGIC);
-        writeInt(u32, dest[4..8], self.width, .big);
-        writeInt(u32, dest[8..12], self.height, .big);
-        dest[12] = self.channels;
-        dest[13] = self.colorspace;
-    }
     fn readQoiHeader(self: *QoiDesc, src: *[14]u8) !void {
         if (!eql(u8, src[0..4], QOI_MAGIC)) {
             return error.InvalidInput;
@@ -55,14 +42,13 @@ const QoiDesc = struct {
         self.colorspace = src[13];
     }
     fn printQoiInfo(self: *QoiDesc) void {
-        print("QOI file info:\n", .{});
-        print("  Width:      {d}\n", .{self.width});
-        print("  Height:     {d}\n", .{self.height});
-        print("  Channels:   {d}\n", .{self.channels});
-        if (self.colorspace == 0) {
-            print("  Colorspace: sRGB\n", .{});
-        } else {
-            print("  Colorspace: Linear RGB\n", .{});
+        print("file is a QOI\n", .{});
+        print("Dimensions: {d}x{d} | \x1b[31mR\x1b[0m\x1b[32mG\x1b[0m\x1b[34mB\x1b[0m", .{ self.width, self.height });
+        if (self.channels > 3) print("\x1b[37mA\x1b[0m", .{});
+
+        switch (self.colorspace) {
+            0 => print(" (sRGB)\n", .{}),
+            else => print(" (Linear RGB)\n", .{}),
         }
     }
 };
@@ -85,12 +71,10 @@ const QoiDec = struct {
             self.buffer[i].vals.red = 0;
             self.buffer[i].vals.green = 0;
             self.buffer[i].vals.blue = 0;
-            self.buffer[i].vals.red = 255;
+            self.buffer[i].vals.alpha = 255;
         }
 
-        self.prev_pixel.vals.red = 0;
-        self.prev_pixel.vals.green = 0;
-        self.prev_pixel.vals.blue = 0;
+        for (0..3) |i| self.prev_pixel.channels[i] = 0;
         self.prev_pixel.vals.alpha = 255;
 
         self.pad = 0;
@@ -103,18 +87,9 @@ const QoiDec = struct {
         self.data = data;
         self.offset = self.data + 14;
     }
-    fn qoiDecRGB(dec: *QoiDec) void {
-        dec.prev_pixel.vals.red = dec.offset[1];
-        dec.prev_pixel.vals.green = dec.offset[2];
-        dec.prev_pixel.vals.blue = dec.offset[3];
-        dec.offset += 4;
-    }
-    fn qoiDecRGBA(dec: *QoiDec) void {
-        dec.prev_pixel.vals.red = dec.offset[1];
-        dec.prev_pixel.vals.green = dec.offset[2];
-        dec.prev_pixel.vals.blue = dec.offset[3];
-        dec.prev_pixel.vals.alpha = dec.offset[4];
-        dec.offset += 5;
+    fn qoiDecFullColor(dec: *QoiDec, s: u3) void {
+        @memcpy(dec.prev_pixel.channels[0 .. s - 1], dec.offset[1..s]);
+        dec.offset += s;
     }
     fn qoiDecIndex(dec: *QoiDec, tag: u8) void {
         dec.prev_pixel = dec.buffer[tag & QOI_TAG_MASK];
@@ -123,22 +98,18 @@ const QoiDec = struct {
     fn qoiDecDiff(dec: *QoiDec, tag: u8) void {
         const diff: u8 = tag & QOI_TAG_MASK;
 
-        const red_diff: u8 = ((diff >> 4) & 0x03) - 2;
-        const green_diff: u8 = ((diff >> 2) & 0x03) - 2;
-        const blue_diff: u8 = (diff & 0x03) - 2;
-
-        dec.prev_pixel.vals.red += red_diff;
-        dec.prev_pixel.vals.green += green_diff;
-        dec.prev_pixel.vals.blue += blue_diff;
+        dec.prev_pixel.vals.red +%= @as(u8, (diff >> 4 & 0x03) -% 2);
+        dec.prev_pixel.vals.green +%= @as(u8, (diff >> 2 & 0x03) -% 2);
+        dec.prev_pixel.vals.blue +%= @as(u8, (diff & 0x03) -% 2);
 
         dec.offset += 1;
     }
     fn qoiDecLuma(dec: *QoiDec, tag: u8) void {
-        const lumaGreen: u8 = (tag & QOI_TAG_MASK) - 32;
+        const lumaGreen: u8 = (tag & QOI_TAG_MASK) -% 32;
 
-        dec.prev_pixel.vals.red +%= lumaGreen + ((dec.offset[1] & 0xF0) >> 4) - 8;
+        dec.prev_pixel.vals.red +%= lumaGreen +% ((dec.offset[1] & 0xF0) >> 4) -% 8;
         dec.prev_pixel.vals.green +%= lumaGreen;
-        dec.prev_pixel.vals.blue +%= lumaGreen + (dec.offset[1] & 0x0F) - 8;
+        dec.prev_pixel.vals.blue +%= lumaGreen +% (dec.offset[1] & 0x0F) -% 8;
 
         dec.offset += 2;
     }
@@ -149,28 +120,28 @@ const QoiDec = struct {
     fn qoiDecodeChunk(dec: *QoiDec) QoiPixel {
         if (dec.run > 0) {
             dec.run -= 1;
-        } else {
-            const tag: u8 = dec.offset[0];
+            dec.pixel_seek += 1;
+            return dec.prev_pixel;
+        }
 
-            if (tag == QOI_OP_RGB) {
-                dec.qoiDecRGB();
-            } else if (tag == QOI_OP_RGBA) {
-                dec.qoiDecRGBA();
-            } else {
-                const tag_type: u8 = tag & QOI_TAG;
-                switch (tag_type) {
+        const tag: u8 = dec.offset[0];
+        switch (tag) {
+            QOI_OP_RGB => dec.qoiDecFullColor(4),
+            QOI_OP_RGBA => dec.qoiDecFullColor(5),
+            else => {
+                switch (tag & QOI_TAG) {
                     QOI_OP_INDEX => dec.qoiDecIndex(tag),
                     QOI_OP_DIFF => dec.qoiDecDiff(tag),
                     QOI_OP_LUMA => dec.qoiDecLuma(tag),
                     QOI_OP_RUN => dec.qoiDecRun(tag),
-                    else => {
-                        dec.offset += 1;
-                    },
+                    else => dec.offset += 1,
                 }
-            }
-            const index_pos: u6 = @truncate(dec.prev_pixel.vals.red *% 3 +% dec.prev_pixel.vals.green *% 5 +% dec.prev_pixel.vals.blue *% 7 +% dec.prev_pixel.vals.alpha *% 11);
-            dec.buffer[index_pos] = dec.prev_pixel;
+            },
         }
+
+        const index_pos: u6 = @truncate(dec.prev_pixel.vals.red *% 3 +% dec.prev_pixel.vals.green *% 5 +% dec.prev_pixel.vals.blue *% 7 +% dec.prev_pixel.vals.alpha *% 11);
+        dec.buffer[index_pos] = dec.prev_pixel;
+
         dec.pixel_seek += 1;
         return dec.prev_pixel;
     }
@@ -178,35 +149,28 @@ const QoiDec = struct {
 
 fn printHelp() void {
     print("Freestanding QOI Decoder in \x1b[33mZig\x1b[0m\n", .{});
-    print("Example usage: qoi-dec-zig [input.qoi] [output]\n", .{});
+    print("Example usage: qoi-dec-zig [input.qoi] [output.pam]\n", .{});
 }
 
 pub fn main() !void {
-    // Get allocator
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    // Parse args into string array (error union needs 'try')
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) {
-        _ = printHelp();
-        return;
-    }
-
-    if (eql(u8, args[1], "-h") or
-        eql(u8, args[1], "--help") or
-        args.len < 3 or
+    if (args.len < 3 or
         args.len > 3 or
+        eql(u8, args[1], "-h") or
+        eql(u8, args[1], "--help") or
         args[1].len < 1)
     {
         _ = printHelp();
         return;
     }
 
-    print("Opening {s} ...\n", .{args[1]});
+    print("Opening {s} ... ", .{args[1]});
 
     const file = try std.fs.cwd().openFile(args[1], .{ .mode = .read_only });
     defer file.close();
@@ -214,56 +178,67 @@ pub fn main() !void {
     const qoi_bytes = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
     defer allocator.free(qoi_bytes);
 
-    var desc = QoiDesc.qoiSetEverything(0, 0, 0, 0);
+    var desc: QoiDesc = .{ .width = 0, .height = 0, .channels = 0, .colorspace = 0 };
     try desc.readQoiHeader(qoi_bytes[0..14]);
     desc.printQoiInfo();
 
     const raw_image_length: usize = @intCast(desc.width * desc.height * desc.channels);
-    var seek: usize = 0;
     if (raw_image_length == 0) return error.InvalidInput;
+    var seek: usize = 0;
+    var pam_header_offset: u8 = 0;
 
     var dec: QoiDec = undefined;
     dec.qoiDecInit(desc, qoi_bytes.ptr, qoi_bytes.len);
 
-    const bytes: []u8 = try allocator.alloc(u8, raw_image_length + 4);
+    const bytes: []u8 = try allocator.alloc(u8, raw_image_length);
     defer allocator.free(bytes);
 
-    print("Decoding {s} --> {s} ...\n", .{ args[1], args[2] });
+    print("Decoding {s} --> {s} ... ", .{ args[1], args[2] });
 
     // !(dec.offset - dec.data > dec.qoi_len - 8) or
     while (!(dec.pixel_seek >= dec.img_area)) {
         const px: QoiPixel = dec.qoiDecodeChunk();
-        bytes[seek] = px.vals.red;
-        bytes[seek + 1] = px.vals.green;
-        bytes[seek + 2] = px.vals.blue;
-        if (desc.channels > 3) bytes[seek + 3] = px.vals.alpha;
+        @memcpy(bytes[seek .. seek + desc.channels], px.channels[0..desc.channels]);
         seek += desc.channels;
     }
 
-    const widthString = try std.fmt.allocPrint(allocator, "{}", .{desc.width});
-    const heightString = try std.fmt.allocPrint(allocator, "{}", .{desc.height});
-    defer allocator.free(widthString);
-    defer allocator.free(heightString);
-
     const outfile = try std.fs.cwd().createFile(args[2], .{ .truncate = true });
     defer outfile.close();
-    if (desc.channels == 3) {
-        _ = try outfile.write("P7\n" ++ "WIDTH ");
-        _ = try outfile.write(widthString);
-        _ = try outfile.write("\nHEIGHT ");
-        _ = try outfile.write(heightString);
-        _ = try outfile.write("\nDEPTH 3\n");
-        _ = try outfile.write("MAXVAL 255\n" ++ "TUPLTYPE " ++ "RGB" ++ "\nENDHDR\n");
-        _ = try outfile.writeAll(bytes);
-    } else {
-        _ = try outfile.write("P7\n" ++ "WIDTH ");
-        _ = try outfile.write(widthString);
-        _ = try outfile.write("\nHEIGHT ");
-        _ = try outfile.write(heightString);
-        _ = try outfile.write("\nDEPTH 4\n");
-        _ = try outfile.write("MAXVAL 255\n" ++ "TUPLTYPE " ++ "RGB_ALPHA" ++ "\nENDHDR\n");
-        _ = try outfile.write(bytes);
-    }
+
+    const widthString = try std.fmt.allocPrint(allocator, "{}", .{desc.width});
+    defer allocator.free(widthString);
+    const heightString = try std.fmt.allocPrint(allocator, "{}", .{desc.height});
+    defer allocator.free(heightString);
+
+    const channelString = switch (desc.channels) {
+        3 => "\nDEPTH 3\n",
+        else => "\nDEPTH 4\n",
+    };
+    const tuplTypeString = switch (desc.channels) {
+        3 => "RGB\n",
+        else => "RGB_ALPHA\n",
+    };
+
+    pam_header_offset = @intCast(9 + widthString.len + 8 + heightString.len + channelString.len + 11 + 9 + tuplTypeString.len + 7);
+
+    _ = try outfile.write("P7\n" ++ "WIDTH ");
+    _ = try outfile.write(widthString);
+    _ = try outfile.write("\nHEIGHT ");
+    _ = try outfile.write(heightString);
+    _ = try outfile.write(channelString);
+    _ = try outfile.write("MAXVAL 255\n" ++ "TUPLTYPE ");
+    _ = try outfile.write(tuplTypeString);
+    _ = try outfile.write("ENDHDR\n");
+
+    _ = try outfile.writeAll(bytes);
 
     print("\x1b[32mSuccess!\x1b[0m\n", .{});
+    const final_filesize: usize = raw_image_length + pam_header_offset;
+    print("\tOriginal:\t{d} bytes\n\tDecompressed:\t{d} bytes ", .{ qoi_bytes.len, final_filesize });
+    if (final_filesize > qoi_bytes.len) {
+        const percent_inc: f64 = (@as(f64, @floatFromInt(final_filesize)) / @as(f64, @floatFromInt(qoi_bytes.len))) * 100.0;
+        print("(\x1b[33m{d:.2}%\x1b[0m bigger)\n", .{percent_inc});
+    } else {
+        print("\n", .{});
+    }
 }

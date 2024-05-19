@@ -11,4 +11,4 @@ zig-out/
 /docgen_tmp/
 
 # Encoder-specific
-*.qoi
+*.pam
