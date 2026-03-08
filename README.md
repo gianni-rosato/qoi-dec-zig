@@ -1,3 +1,7 @@
+# Deprecated Project
+
+Succeeded by [qoilib](https://github.com/gianni-rosato/qoilib), which includes encode functionality.
+
 # QOI Image Decoder in Zig
 
 This Zig program decodes images in the Quite OK Image Format (QOI) into Portable Arbitrary Map (PAM) files. It is a freestanding implementation, existing entirely in one file. The QOI format is a simple, lossless image format designed for fast encoding and decoding.
